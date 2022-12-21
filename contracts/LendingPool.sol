@@ -16,7 +16,13 @@ contract LendingPool {
 
     error CallFailed();
 
-    struct AccountLiquidity {
+    error NoBorrowingCapacity();
+
+    error HealthyPosition();
+
+    error ShortOfValue();
+
+    struct AccountVars {
         uint256 borrowBalance;
         uint256 maximumBorrowable;
     }
@@ -24,12 +30,14 @@ contract LendingPool {
     uint256 internal constant WAD = 1e18;
 
     mapping(address => uint) public userShareBalance;
-    mapping(address => AccountLiquidity) public userPosition;
+    mapping(address => AccountVars) public userPosition;
 
     uint totalShares;
     uint totalTokensBorrowed;
     uint totalTokensDeposited;
     uint lastAccrualBlock;
+
+    uint liquidationThreshold;
 
     address interestRateModel;
 
@@ -100,6 +108,58 @@ contract LendingPool {
 
     function getInterestRateModel() internal view returns(address){
         return interestRateModel;
+    }
+
+    function borrow(uint amount) external {
+
+        accruedInterest();
+
+        uint sharesToBorrow = (amount*internalBalanceExchangeRate())/WAD;
+        uint userCollat = (userShareBalance[msg.sender]*internalBalanceExchangeRate())/WAD;
+
+        AccountVars memory up = userPosition[msg.sender];
+
+        up.maximumBorrowable = (userCollat*liquidationThreshold)/WAD;
+
+        if(up.borrowBalance + sharesToBorrow >= up.maximumBorrowable) revert NoBorrowingCapacity();
+
+        up.borrowBalance  += sharesToBorrow;
+
+        userPosition[msg.sender] = up;
+
+        totalTokensBorrowed += amount;
+    }
+
+    function repay(uint amount) external {
+
+        //TODO should this be here?
+        accruedInterest();
+
+        uint sharesToPay = (amount*internalBalanceExchangeRate())/WAD;
+
+        AccountVars storage up = userPosition[msg.sender];
+
+        up.borrowBalance -= sharesToPay;
+    }
+
+    function liquidate(address target) external payable {
+
+        accruedInterest();
+
+        AccountVars memory up = userPosition[target];
+
+        if(up.borrowBalance < up.maximumBorrowable) revert HealthyPosition();
+
+        if(msg.value < up.borrowBalance) revert ShortOfValue();
+
+        up.borrowBalance = 0;
+
+        uint userCollat = (userShareBalance[target]*internalBalanceExchangeRate())/WAD;
+
+        (bool sent,) = address(msg.sender).call{value: userCollat}("");
+        if(!sent) revert CallFailed();
+
+        totalTokensDeposited -= userCollat;
     }
 
 }
